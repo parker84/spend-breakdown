@@ -55,8 +55,47 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Color palette
-COLORS = {
+# Account configurations
+ACCOUNTS = {
+    "td_visa_credit_card": {
+        "name": "TD Visa Credit Card",
+        "date_format": "%m/%d/%Y",
+        "filter_june": True,  # Filter out June for credit card (incomplete data)
+        "debit_column": "debit",  # Spending is in debit column
+        "filter_payments": True,  # Filter out PREAUTHORIZED PAYMENT
+    },
+    "brydon_amex": {
+        "name": "Brydon Amex",
+        "date_format": "mixed",  # Mixed formats: "29 Dec. 2025" and "21 May 2025"
+        "filter_june": False,  # Full year data
+        "debit_column": "debit",
+        "filter_payments": False,
+    },
+    "kennedy_amex": {
+        "name": "Kennedy Amex",
+        "date_format": "mixed",  # Mixed formats: "29 Dec. 2025" and "21 May 2025"
+        "filter_june": False,  # Full year data
+        "debit_column": "debit",
+        "filter_payments": False,
+    },
+    "brydon_chequings": {
+        "name": "Brydon Chequings",
+        "date_format": "%Y-%m-%d",
+        "filter_june": False,
+        "debit_column": "debit",  # Withdrawals are in debit column
+        "filter_payments": False,
+    },
+    "joint_chequings": {
+        "name": "Joint Chequings",
+        "date_format": "%Y-%m-%d",
+        "filter_june": False,
+        "debit_column": "debit",
+        "filter_payments": False,
+    },
+}
+
+# Color palettes for different account types
+CREDIT_CARD_COLORS = {
     "groceries": "#00d4aa",
     "beer_liquor": "#ff6b6b",
     "coffee": "#c9a227",
@@ -71,20 +110,64 @@ COLORS = {
     "other": "#6b7280"
 }
 
+CHEQUING_COLORS = {
+    "mortgage": "#ff6b6b",
+    "housing": "#00d4aa",
+    "insurance": "#a855f7",
+    "telecom": "#4ecdc4",
+    "credit_card_payment": "#ec4899",
+    "transfers": "#64748b",
+    "loans": "#f59e0b",
+    "investments": "#22c55e",
+    "bank_fees": "#6b7280",
+    "e_transfers": "#06b6d4",
+    "cash_withdrawal": "#c9a227",
+    "income": "#10b981",
+    "eating_out": "#ff8c42",
+    "other": "#6b7280"
+}
+
+AMEX_COLORS = {
+    "pet": "#f472b6",
+    "groceries": "#00d4aa",
+    "beer_liquor": "#ff6b6b",
+    "coffee": "#c9a227",
+    "eating_out": "#ff8c42",
+    "goods_gifts": "#ec4899",
+    "transportation": "#4ecdc4",
+    "travel": "#818cf8",
+    "entertainment": "#06b6d4",
+    "subscriptions": "#a855f7",
+    "donations": "#22c55e",
+    "beauty_lifestyle": "#fb7185",
+    "home": "#84cc16",
+    "other": "#6b7280"
+}
+
 
 @st.cache_data
-def load_data():
-    """Load and prepare the classified transactions data."""
-    df = pd.read_csv(Path("data/processed/classified_transactions.csv"))
+def load_data(account_key: str):
+    """Load and prepare the classified transactions data for a specific account."""
+    config = ACCOUNTS[account_key]
+    file_path = Path(f"data/processed/{account_key}_classified.csv")
     
-    # Filter out PREAUTHORIZED PAYMENT
-    df = df[~df["description"].str.contains("PREAUTHORIZED PAYMENT", case=False, na=False)]
+    df = pd.read_csv(file_path)
+    
+    # Filter out PREAUTHORIZED PAYMENT for credit card
+    if config["filter_payments"]:
+        df = df[~df["description"].str.contains("PREAUTHORIZED PAYMENT", case=False, na=False)]
     
     # Parse dates
-    df["date"] = pd.to_datetime(df["date"], format="%m/%d/%Y")
+    date_format = config["date_format"]
+    if date_format == "mixed":
+        # For Amex: mixed formats like "29 Dec. 2025" and "21 May 2025"
+        df["date"] = pd.to_datetime(df["date"], format="mixed", dayfirst=True)
+    else:
+        df["date"] = pd.to_datetime(df["date"], format=date_format)
     
-    # Filter out June (incomplete data)
-    df = df[df["date"].dt.month != 6]
+    # Filter out June for credit card (incomplete data)
+    if config["filter_june"]:
+        df = df[df["date"].dt.month != 6]
     
     df["month"] = df["date"].dt.to_period("M")
     df["month_str"] = df["date"].dt.strftime("%b %Y")
@@ -92,26 +175,52 @@ def load_data():
     
     # Fill NaN debits with 0 for calculations
     df["debit"] = df["debit"].fillna(0)
+    df["credit"] = df["credit"].fillna(0)
     
     return df
 
 
+def get_colors(account_key: str) -> dict:
+    """Get the color palette for the account type."""
+    if account_key == "td_visa_credit_card":
+        return CREDIT_CARD_COLORS
+    elif account_key in ["brydon_amex", "kennedy_amex"]:
+        return AMEX_COLORS
+    return CHEQUING_COLORS
+
+
 def main():
     st.title("💰 Spend Breakdown Dashboard")
+    
+    # Account selector
+    account_key = st.selectbox(
+        "Select Account",
+        options=list(ACCOUNTS.keys()),
+        format_func=lambda x: ACCOUNTS[x]["name"],
+        index=0
+    )
+    
     st.markdown("---")
     
-    # Load data
-    df = load_data()
+    # Load data for selected account
+    df = load_data(account_key)
+    colors = get_colors(account_key)
     
-    # Only include debit transactions (spending)
+    # Only include debit transactions (spending/withdrawals)
     spending_df = df[df["debit"] > 0].copy()
+    
+    # For chequing, exclude income and transfers (they're withdrawals from one account but not expenses)
+    if account_key != "td_visa_credit_card":
+        # Keep only expense categories, not transfers/income
+        exclude_categories = ["income", "transfers", "credit_card_payment"]
+        spending_df = spending_df[~spending_df["category"].isin(exclude_categories)]
     
     # Summary metrics
     col1, col2, col3, col4 = st.columns(4)
     
     total_spend = spending_df["debit"].sum()
     num_transactions = len(spending_df)
-    avg_transaction = spending_df["debit"].mean()
+    avg_transaction = spending_df["debit"].mean() if num_transactions > 0 else 0
     num_months = spending_df["month"].nunique()
     
     with col1:
@@ -121,7 +230,7 @@ def main():
     with col3:
         st.metric("Avg Transaction", f"${avg_transaction:.2f}")
     with col4:
-        st.metric("Monthly Avg", f"${total_spend / num_months:,.2f}")
+        st.metric("Monthly Avg", f"${total_spend / max(num_months, 1):,.2f}")
     
     st.markdown("---")
     
@@ -173,13 +282,13 @@ def main():
         category_spend = spending_df.groupby("category")["debit"].sum().reset_index()
         category_spend = category_spend.sort_values("debit", ascending=False)
         
-        colors = [COLORS.get(cat, "#6b7280") for cat in category_spend["category"]]
+        chart_colors = [colors.get(cat, "#6b7280") for cat in category_spend["category"]]
         
         fig_donut = go.Figure(data=[go.Pie(
             labels=category_spend["category"],
             values=category_spend["debit"],
             hole=0.6,
-            marker=dict(colors=colors),
+            marker=dict(colors=chart_colors),
             textinfo="percent",
             textfont=dict(color="white", size=11),
             hovertemplate="<b>%{label}</b><br>$%{value:,.2f}<br>%{percent}<extra></extra>"
@@ -239,21 +348,27 @@ def main():
                 
                 with col:
                     fig_cat = go.Figure()
+                    cat_color = colors.get(category, "#6b7280")
+                    
+                    # Parse hex color to RGB for fill
+                    hex_color = cat_color.lstrip('#')
+                    rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                    
                     fig_cat.add_trace(go.Scatter(
                         x=cat_data_full["month_label"],
                         y=cat_data_full["debit"],
                         mode="lines+markers",
-                        line=dict(color=COLORS.get(category, "#6b7280"), width=2),
+                        line=dict(color=cat_color, width=2),
                         marker=dict(size=6),
                         fill="tozeroy",
-                        fillcolor=f"rgba{tuple(list(int(COLORS.get(category, '#6b7280').lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + [0.15])}",
+                        fillcolor=f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, 0.15)",
                         hovertemplate="$%{y:,.2f}<extra></extra>"
                     ))
                     
                     fig_cat.update_layout(
                         title=dict(
                             text=f"{category.replace('_', ' ').title()}<br><span style='font-size:12px;color:#8892b0'>${total:,.0f} total · ${monthly_avg:,.0f}/mo</span>",
-                            font=dict(size=14, color=COLORS.get(category, "#6b7280")),
+                            font=dict(size=14, color=cat_color),
                             x=0.5
                         ),
                         paper_bgcolor="rgba(0,0,0,0)",
@@ -322,4 +437,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
