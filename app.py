@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+import datetime
 
 # Page config
 st.set_page_config(
@@ -57,6 +58,10 @@ st.markdown("""
 
 # Account configurations
 ACCOUNTS = {
+    "combined_all": {
+        "name": "📊 All Accounts Combined",
+        "is_combined": True,
+    },
     "td_visa_credit_card": {
         "name": "TD Visa Credit Card",
         "date_format": "%m/%d/%Y",
@@ -144,17 +149,24 @@ AMEX_COLORS = {
     "other": "#6b7280"
 }
 
+# Combined view uses all colors from all palettes
+COMBINED_COLORS = {
+    **CREDIT_CARD_COLORS,
+    **AMEX_COLORS,
+    **CHEQUING_COLORS,
+}
+
 
 @st.cache_data
-def load_data(account_key: str):
-    """Load and prepare the classified transactions data for a specific account."""
+def load_single_account(account_key: str):
+    """Load and prepare the classified transactions data for a single account."""
     config = ACCOUNTS[account_key]
     file_path = Path(f"data/processed/{account_key}_classified.csv")
     
     df = pd.read_csv(file_path)
     
     # Filter out PREAUTHORIZED PAYMENT for credit card
-    if config["filter_payments"]:
+    if config.get("filter_payments", False):
         df = df[~df["description"].str.contains("PREAUTHORIZED PAYMENT", case=False, na=False)]
     
     # Parse dates
@@ -166,7 +178,7 @@ def load_data(account_key: str):
         df["date"] = pd.to_datetime(df["date"], format=date_format)
     
     # Filter out June for credit card (incomplete data)
-    if config["filter_june"]:
+    if config.get("filter_june", False):
         df = df[df["date"].dt.month != 6]
     
     df["month"] = df["date"].dt.to_period("M")
@@ -177,12 +189,41 @@ def load_data(account_key: str):
     df["debit"] = df["debit"].fillna(0)
     df["credit"] = df["credit"].fillna(0)
     
+    # Add account name for combined view
+    df["account_name"] = config["name"]
+    
     return df
+
+
+@st.cache_data
+def load_combined_data():
+    """Load and combine data from all accounts (excluding chequing for spending analysis)."""
+    # Only combine credit card accounts for spending analysis
+    credit_accounts = ["td_visa_credit_card", "brydon_amex", "kennedy_amex"]
+    
+    dfs = []
+    for account_key in credit_accounts:
+        if account_key in ACCOUNTS:
+            df = load_single_account(account_key)
+            dfs.append(df)
+    
+    combined = pd.concat(dfs, ignore_index=True)
+    return combined
+
+
+@st.cache_data
+def load_data(account_key: str):
+    """Load data for a specific account or combined view."""
+    if account_key == "combined_all":
+        return load_combined_data()
+    return load_single_account(account_key)
 
 
 def get_colors(account_key: str) -> dict:
     """Get the color palette for the account type."""
-    if account_key == "td_visa_credit_card":
+    if account_key == "combined_all":
+        return COMBINED_COLORS
+    elif account_key == "td_visa_credit_card":
         return CREDIT_CARD_COLORS
     elif account_key in ["brydon_amex", "kennedy_amex"]:
         return AMEX_COLORS
@@ -200,18 +241,57 @@ def main():
         index=0
     )
     
-    st.markdown("---")
-    
     # Load data for selected account
     df = load_data(account_key)
     colors = get_colors(account_key)
     
+    # Sidebar date filters
+    with st.sidebar:
+        st.header("📅 Date Filters")
+        
+        # Get min/max dates from data
+        min_date = df["date"].min().date()
+        max_date = df["date"].max().date()
+        
+        # Default start date: July for TD Visa and Combined (June is incomplete), January for others
+        if account_key in ["td_visa_credit_card", "combined_all"]:
+            # Start from July 1st (after incomplete June)
+            default_start = datetime.date(2025, 7, 1)
+            if default_start < min_date:
+                default_start = min_date
+        else:
+            # Start from January 1st
+            default_start = datetime.date(2025, 1, 1)
+            if default_start < min_date:
+                default_start = min_date
+        
+        start_date = st.date_input(
+            "Start Date",
+            value=default_start,
+            min_value=min_date,
+            max_value=max_date
+        )
+        
+        end_date = st.date_input(
+            "End Date",
+            value=max_date,
+            min_value=min_date,
+            max_value=max_date
+        )
+        
+        st.markdown("---")
+    
+    # Apply date filters
+    df = df[(df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)]
+    
+    st.markdown("---")
+    
     # Only include debit transactions (spending/withdrawals)
     spending_df = df[df["debit"] > 0].copy()
     
-    # For chequing, exclude income and transfers (they're withdrawals from one account but not expenses)
-    if account_key != "td_visa_credit_card":
-        # Keep only expense categories, not transfers/income
+    # For chequing accounts, exclude income and transfers (they're withdrawals but not expenses)
+    chequing_accounts = ["brydon_chequings", "joint_chequings"]
+    if account_key in chequing_accounts:
         exclude_categories = ["income", "transfers", "credit_card_payment"]
         spending_df = spending_df[~spending_df["category"].isin(exclude_categories)]
     
