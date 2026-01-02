@@ -61,6 +61,12 @@ ACCOUNTS = {
     "combined_all": {
         "name": "📊 All Accounts Combined",
         "is_combined": True,
+        "include_chequing": True,
+    },
+    "combined_credit_cards": {
+        "name": "💳 Combined Credit Cards",
+        "is_combined": True,
+        "include_chequing": False,
     },
     "td_visa_credit_card": {
         "name": "TD Visa Credit Card",
@@ -196,13 +202,17 @@ def load_single_account(account_key: str):
 
 
 @st.cache_data
-def load_combined_data():
-    """Load and combine data from all accounts (excluding chequing for spending analysis)."""
-    # Only combine credit card accounts for spending analysis
+def load_combined_data(include_chequing: bool = False):
+    """Load and combine data from multiple accounts."""
     credit_accounts = ["td_visa_credit_card", "brydon_amex", "kennedy_amex"]
+    chequing_accounts = ["brydon_chequings", "joint_chequings"]
+    
+    accounts_to_load = credit_accounts.copy()
+    if include_chequing:
+        accounts_to_load.extend(chequing_accounts)
     
     dfs = []
-    for account_key in credit_accounts:
+    for account_key in accounts_to_load:
         if account_key in ACCOUNTS:
             df = load_single_account(account_key)
             dfs.append(df)
@@ -215,13 +225,15 @@ def load_combined_data():
 def load_data(account_key: str):
     """Load data for a specific account or combined view."""
     if account_key == "combined_all":
-        return load_combined_data()
+        return load_combined_data(include_chequing=True)
+    elif account_key == "combined_credit_cards":
+        return load_combined_data(include_chequing=False)
     return load_single_account(account_key)
 
 
 def get_colors(account_key: str) -> dict:
     """Get the color palette for the account type."""
-    if account_key == "combined_all":
+    if account_key in ["combined_all", "combined_credit_cards"]:
         return COMBINED_COLORS
     elif account_key == "td_visa_credit_card":
         return CREDIT_CARD_COLORS
@@ -253,8 +265,8 @@ def main():
         min_date = df["date"].min().date()
         max_date = df["date"].max().date()
         
-        # Default start date: July for TD Visa and Combined (June is incomplete), January for others
-        if account_key in ["td_visa_credit_card", "combined_all"]:
+        # Default start date: July for TD Visa and Combined views (June is incomplete), January for others
+        if account_key in ["td_visa_credit_card", "combined_all", "combined_credit_cards"]:
             # Start from July 1st (after incomplete June)
             default_start = datetime.date(2025, 7, 1)
             if default_start < min_date:
@@ -289,11 +301,16 @@ def main():
     # Only include debit transactions (spending/withdrawals)
     spending_df = df[df["debit"] > 0].copy()
     
-    # For chequing accounts, exclude income and transfers (they're withdrawals but not expenses)
-    chequing_accounts = ["brydon_chequings", "joint_chequings"]
-    if account_key in chequing_accounts:
+    # For chequing accounts (or combined views that include them), exclude income and transfers
+    if account_key in ["brydon_chequings", "joint_chequings"]:
         exclude_categories = ["income", "transfers", "credit_card_payment"]
         spending_df = spending_df[~spending_df["category"].isin(exclude_categories)]
+    elif account_key == "combined_all":
+        # For combined all, only exclude these categories from chequing account transactions
+        chequing_mask = spending_df["account"].isin(["brydon_chequings", "joint_chequings"])
+        exclude_categories = ["income", "transfers", "credit_card_payment"]
+        exclude_mask = chequing_mask & spending_df["category"].isin(exclude_categories)
+        spending_df = spending_df[~exclude_mask]
     
     # Summary metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -499,10 +516,16 @@ def main():
         filtered_df = filtered_df[filtered_df["month_str"].isin(selected_months)]
     
     # Prepare display dataframe
-    display_df = filtered_df[["date", "description", "debit", "category"]].copy()
-    display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
-    display_df = display_df.sort_values("date", ascending=False)
-    display_df.columns = ["Date", "Description", "Amount", "Category"]
+    if account_key in ["combined_all", "combined_credit_cards"]:
+        display_df = filtered_df[["date", "account_name", "description", "debit", "category"]].copy()
+        display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
+        display_df = display_df.sort_values("date", ascending=False)
+        display_df.columns = ["Date", "Account", "Description", "Amount", "Category"]
+    else:
+        display_df = filtered_df[["date", "description", "debit", "category"]].copy()
+        display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
+        display_df = display_df.sort_values("date", ascending=False)
+        display_df.columns = ["Date", "Description", "Amount", "Category"]
     
     # Show summary for filtered data
     st.markdown(f"**Showing {len(display_df)} transactions** | **Total: ${filtered_df['debit'].sum():,.2f}**")
