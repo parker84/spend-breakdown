@@ -8,6 +8,7 @@ import json
 
 # Paths
 USER_ACCOUNTS_FILE = Path("data/user_accounts.json")
+USER_CATEGORIES_FILE = Path("data/user_categories.json")
 USER_DATA_DIR = Path("data/user_uploads")
 USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -58,10 +59,11 @@ st.markdown("""
 
 # Account type options
 ACCOUNT_TYPES = {
-    "amex": "Amex Credit Card",
     "td_credit_card": "TD Credit Card",
-    "td_chequing": "TD Chequing Account"
+    "td_chequing": "TD Chequing Account",
+    "amex": "Amex Credit Card"
 }
+
 
 # Category definitions for TD Chequing accounts
 TD_CHEQUING_CATEGORIES = {
@@ -322,6 +324,69 @@ AMEX_CATEGORIES = {
     ]
 }
 
+# Combine all category dictionaries into one unified CATEGORIES dict
+# Merge keywords from all sources for each category
+def _merge_categories(*category_dicts):
+    """Merge multiple category dictionaries, combining keywords for matching categories."""
+    merged = {}
+    for cat_dict in category_dicts:
+        for category, keywords in cat_dict.items():
+            if category not in merged:
+                merged[category] = []
+            # Add keywords, avoiding duplicates
+            for kw in keywords:
+                if kw not in merged[category]:
+                    merged[category].append(kw)
+    return merged
+
+# Order matters! Put ordering_in keywords before transportation to catch UberEats before Uber
+CATEGORIES = _merge_categories(TD_CREDIT_CARD_CATEGORIES, TD_CHEQUING_CATEGORIES, AMEX_CATEGORIES)
+
+# Reorder so ordering_in comes before transportation in the dict
+# (Python 3.7+ maintains dict insertion order)
+_ordered_categories = {}
+# First add ordering_in if it exists
+if "ordering_in" in CATEGORIES:
+    _ordered_categories["ordering_in"] = CATEGORIES["ordering_in"]
+# Then add all other categories
+for cat, keywords in CATEGORIES.items():
+    if cat != "ordering_in":
+        _ordered_categories[cat] = keywords
+CATEGORIES = _ordered_categories
+
+# Categories to exclude from spending analysis (to avoid double counting)
+EXCLUDED_CATEGORIES = {
+    "credit_card_payment",
+    "transfers",
+    "income",
+    "investments",
+    "cash_withdrawal"
+}
+
+def classify_with_keywords(description: str, categories: dict = None) -> str:
+    """Classify a transaction based on keyword matching."""
+    if categories is None:
+        # Try to get user categories from session state, fallback to default
+        try:
+            categories = st.session_state.get("user_categories", CATEGORIES)
+        except Exception:
+            categories = CATEGORIES
+    
+    description_upper = description.upper()
+    
+    for category, cat_info in categories.items():
+        keywords = cat_info.get("keywords", []) if isinstance(cat_info, dict) else cat_info
+        for keyword in keywords:
+            if keyword.upper() in description_upper:
+                return category
+    
+    return "other"
+
+
+def classify_transaction(description: str, categories: dict = None) -> str:
+    """Classify a single transaction (keyword-based fallback)."""
+    return classify_with_keywords(description, categories)
+
 # Color palette
 COLORS = {
     "pet": "#f472b6",
@@ -382,6 +447,31 @@ def save_user_accounts(accounts: dict):
     USER_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(USER_ACCOUNTS_FILE, "w") as f:
         json.dump(accounts, f, indent=2)
+
+
+def load_user_categories() -> dict:
+    """Load user-customized categories from JSON file, or return defaults."""
+    if USER_CATEGORIES_FILE.exists():
+        try:
+            with open(USER_CATEGORIES_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, Exception):
+            pass
+    return CATEGORIES
+
+
+def save_user_categories(categories: dict):
+    """Save user-customized categories to JSON file."""
+    USER_CATEGORIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(USER_CATEGORIES_FILE, "w") as f:
+        json.dump(categories, f, indent=2)
+
+
+def get_active_categories() -> dict:
+    """Get the active categories (user-customized or default)."""
+    if "user_categories" not in st.session_state:
+        st.session_state.user_categories = load_user_categories()
+    return st.session_state.user_categories
 
 
 def parse_amex_xls(uploaded_file) -> pd.DataFrame:
@@ -524,24 +614,35 @@ def parse_td_credit_card_csvs(uploaded_files: list) -> pd.DataFrame:
     return combined_df
 
 
-def process_uploaded_file(uploaded_file, account_name: str, account_type: str = "amex") -> tuple[pd.DataFrame, str]:
+def process_uploaded_file(uploaded_file, account_name: str, account_type: str = "amex", progress_bar=None, status_text=None) -> tuple[pd.DataFrame, str]:
     """Process uploaded file: parse, classify, and save."""
+    
+    # Update status
+    if status_text:
+        status_text.text("Parsing file...")
     
     # Parse based on account type
     if account_type == "amex":
         df = parse_amex_xls(uploaded_file)
-        categories = AMEX_CATEGORIES
     elif account_type == "td_chequing":
         df = parse_td_chequing_csv(uploaded_file)
-        categories = TD_CHEQUING_CATEGORIES
     else:
         raise ValueError(f"Unknown account type: {account_type}")
     
     if len(df) == 0:
         raise ValueError("No valid transactions found in file")
     
-    # Classify transactions
-    df["category"] = df["description"].apply(lambda x: classify_transaction(x, categories))
+    # Classify transactions with keywords
+    if status_text:
+        status_text.text(f"Found {len(df)} transactions. Classifying...")
+    
+    if progress_bar:
+        progress_bar.progress(0.5, text="Classifying transactions...")
+    
+    df["category"] = df["description"].apply(classify_with_keywords)
+    
+    if progress_bar:
+        progress_bar.progress(1.0, text="Done!")
     
     # Generate account key
     account_key = account_name.lower().replace(" ", "_").replace("-", "_")
@@ -564,8 +665,11 @@ def process_uploaded_file(uploaded_file, account_name: str, account_type: str = 
     return df, account_key
 
 
-def process_td_credit_card_files(uploaded_files: list, account_name: str) -> tuple[pd.DataFrame, str]:
+def process_td_credit_card_files(uploaded_files: list, account_name: str, progress_bar=None, status_text=None) -> tuple[pd.DataFrame, str]:
     """Process multiple TD Credit Card CSV files: parse, combine, dedupe, classify, and save."""
+    
+    if status_text:
+        status_text.text(f"Parsing {len(uploaded_files)} files...")
     
     # Parse and combine all files
     df = parse_td_credit_card_csvs(uploaded_files)
@@ -573,8 +677,17 @@ def process_td_credit_card_files(uploaded_files: list, account_name: str) -> tup
     if len(df) == 0:
         raise ValueError("No valid transactions found in files")
     
-    # Classify transactions
-    df["category"] = df["description"].apply(lambda x: classify_transaction(x, TD_CREDIT_CARD_CATEGORIES))
+    # Classify transactions with keywords
+    if status_text:
+        status_text.text(f"Found {len(df)} transactions. Classifying...")
+    
+    if progress_bar:
+        progress_bar.progress(0.5, text="Classifying transactions...")
+    
+    df["category"] = df["description"].apply(classify_with_keywords)
+    
+    if progress_bar:
+        progress_bar.progress(1.0, text="Done!")
     
     # Generate account key
     account_key = account_name.lower().replace(" ", "_").replace("-", "_")
@@ -700,18 +813,28 @@ def main():
                         st.error("Please enter an account name")
                     else:
                         try:
-                            with st.spinner("Processing your statement..."):
-                                if onboard_account_type == "td_credit_card":
-                                    df, account_key = process_td_credit_card_files(
-                                        onboard_files,
-                                        onboard_account_name.strip()
-                                    )
-                                else:
-                                    df, account_key = process_uploaded_file(
-                                        onboard_files[0],
-                                        onboard_account_name.strip(),
-                                        onboard_account_type
-                                    )
+                            # Create progress elements
+                            status_text = st.empty()
+                            progress_bar = st.progress(0, text="Starting...")
+                            
+                            if onboard_account_type == "td_credit_card":
+                                df, account_key = process_td_credit_card_files(
+                                    onboard_files,
+                                    onboard_account_name.strip(),
+                                    progress_bar=progress_bar,
+                                    status_text=status_text
+                                )
+                            else:
+                                df, account_key = process_uploaded_file(
+                                    onboard_files[0],
+                                    onboard_account_name.strip(),
+                                    onboard_account_type,
+                                    progress_bar=progress_bar,
+                                    status_text=status_text
+                                )
+                            
+                            progress_bar.progress(1.0, text="Complete!")
+                            status_text.empty()
                             st.success(f"✅ Added {len(df)} transactions!")
                             st.cache_data.clear()
                             st.rerun()
@@ -736,16 +859,7 @@ def main():
             )
             
             # File type hint and uploader based on account type
-            if account_type == "amex":
-                st.caption("Upload your Amex XLS export file")
-                uploaded_file = st.file_uploader(
-                    "Choose file",
-                    type=["xls", "xlsx"],
-                    key="uploader",
-                    label_visibility="collapsed"
-                )
-                uploaded_files = [uploaded_file] if uploaded_file else []
-            elif account_type == "td_credit_card":
+            if account_type == "td_credit_card":
                 st.caption("Upload your TD Credit Card CSV files (multiple monthly statements)")
                 uploaded_files = st.file_uploader(
                     "Choose files",
@@ -754,11 +868,20 @@ def main():
                     label_visibility="collapsed",
                     accept_multiple_files=True
                 )
-            else:  # td_chequing
+            elif account_type == "td_chequing":
                 st.caption("Upload your TD Chequing CSV export file")
                 uploaded_file = st.file_uploader(
                     "Choose file",
                     type=["csv"],
+                    key="uploader_chq",
+                    label_visibility="collapsed"
+                )
+                uploaded_files = [uploaded_file] if uploaded_file else []
+            else:  # amex
+                st.caption("Upload your Amex XLS export file")
+                uploaded_file = st.file_uploader(
+                    "Choose file",
+                    type=["xls", "xlsx"],
                     key="uploader",
                     label_visibility="collapsed"
                 )
@@ -779,18 +902,28 @@ def main():
                         st.error("Please enter an account name")
                     else:
                         try:
-                            with st.spinner("Processing..."):
-                                if account_type == "td_credit_card":
-                                    df, account_key = process_td_credit_card_files(
-                                        uploaded_files,
-                                    account_name.strip()
+                            # Create progress elements
+                            status_text = st.empty()
+                            progress_bar = st.progress(0, text="Starting...")
+                            
+                            if account_type == "td_credit_card":
+                                df, account_key = process_td_credit_card_files(
+                                    uploaded_files,
+                                    account_name.strip(),
+                                    progress_bar=progress_bar,
+                                    status_text=status_text
                                 )
-                                else:
-                                    df, account_key = process_uploaded_file(
-                                        uploaded_files[0],
-                                        account_name.strip(),
-                                        account_type
+                            else:
+                                df, account_key = process_uploaded_file(
+                                    uploaded_files[0],
+                                    account_name.strip(),
+                                    account_type,
+                                    progress_bar=progress_bar,
+                                    status_text=status_text
                                 )
+                            
+                            progress_bar.progress(1.0, text="Complete!")
+                            status_text.empty()
                             st.success(f"✅ Added {len(df)} transactions!")
                             st.cache_data.clear()
                             st.rerun()
@@ -834,7 +967,7 @@ def main():
     
     # Sidebar: Date filters and account management
     with st.sidebar:
-        st.header("📅 Date Filters")
+        st.header("📅 Dates")
         
         min_date = df["date"].min().date()
         max_date = df["date"].max().date()
@@ -850,7 +983,7 @@ def main():
         
         # Account management
         if accounts:
-            st.header("⚙️ Manage Accounts")
+            st.header("⚙️ Accounts")
             for key, config in list(accounts.items()):
                 col1, col2 = st.columns([3, 1])
                 with col1:
@@ -921,23 +1054,124 @@ def main():
                             st.error("Please enter an account name")
                         else:
                             try:
-                                with st.spinner("Processing..."):
-                                    if sidebar_account_type == "td_credit_card":
-                                        df_new, account_key = process_td_credit_card_files(
-                                            sidebar_files,
-                                            sidebar_account_name.strip()
-                                        )
-                                    else:
-                                        df_new, account_key = process_uploaded_file(
-                                            sidebar_files[0],
-                                            sidebar_account_name.strip(),
-                                            sidebar_account_type
-                                        )
+                                # Create progress elements
+                                status_text = st.empty()
+                                progress_bar = st.progress(0, text="Starting...")
+                                
+                                if sidebar_account_type == "td_credit_card":
+                                    df_new, account_key = process_td_credit_card_files(
+                                        sidebar_files,
+                                        sidebar_account_name.strip(),
+                                        progress_bar=progress_bar,
+                                        status_text=status_text
+                                    )
+                                else:
+                                    df_new, account_key = process_uploaded_file(
+                                        sidebar_files[0],
+                                        sidebar_account_name.strip(),
+                                        sidebar_account_type,
+                                        progress_bar=progress_bar,
+                                        status_text=status_text
+                                    )
+                                
+                                progress_bar.progress(1.0, text="Complete!")
+                                status_text.empty()
                                 st.success(f"✅ Added {len(df_new)} transactions!")
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error: {e}")
+        
+        st.markdown("---")
+        
+        # Advanced Settings Header
+        st.header("⚙️ Settings")
+        
+        # 1. Category Definitions Popover
+        with st.popover("📋 Category Definitions", use_container_width=True):
+            st.markdown("### Edit Categories")
+            st.caption("Customize the keywords used for transaction classification")
+            
+            # Get current categories
+            current_categories = get_active_categories()
+            
+            # Convert to JSON string for editing
+            categories_json = json.dumps(current_categories, indent=2)
+            
+            # Text area for editing (with fixed height)
+            edited_json = st.text_area(
+                "Categories JSON",
+                value=categories_json,
+                height=400,
+                key="categories_editor",
+                label_visibility="collapsed"
+            )
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("💾 Save", use_container_width=True, key="save_categories"):
+                    try:
+                        # Parse the edited JSON
+                        new_categories = json.loads(edited_json)
+                        
+                        # Validate structure (basic check)
+                        if not isinstance(new_categories, dict):
+                            st.error("Invalid format: must be a JSON object")
+                        else:
+                            # Save to file and session state
+                            save_user_categories(new_categories)
+                            st.session_state.user_categories = new_categories
+                            st.success("✅ Categories saved!")
+                    except json.JSONDecodeError as e:
+                        st.error(f"Invalid JSON: {e}")
+            
+            with col2:
+                if st.button("🔄 Reset", use_container_width=True, key="reset_categories"):
+                    # Delete user categories file and reset session state
+                    if USER_CATEGORIES_FILE.exists():
+                        USER_CATEGORIES_FILE.unlink()
+                    st.session_state.user_categories = CATEGORIES
+                    st.success("✅ Reset to defaults!")
+                    st.rerun()
+        
+        # 2. Re-classify Popover
+        with st.popover("🔄 Re-classify", use_container_width=True):
+            st.markdown("### Re-classify All Transactions")
+            st.caption("Re-run keyword classification on all accounts using current category definitions")
+            
+            if st.button("🔄 Re-classify All", type="primary", use_container_width=True, key="reclassify_btn"):
+                try:
+                    progress_bar = st.progress(0, text="Starting re-classification...")
+                    accounts_to_process = list(accounts.items())
+                    total_accounts = len(accounts_to_process)
+                    active_cats = get_active_categories()
+                    
+                    for idx, (account_key, config) in enumerate(accounts_to_process):
+                        progress_bar.progress(
+                            (idx / total_accounts),
+                            text=f"Re-classifying {config['name']}..."
+                        )
+                        
+                        # Load the account data
+                        file_path = Path(config["file_path"])
+                        if file_path.exists():
+                            df_account = pd.read_csv(file_path, parse_dates=["date"])
+                            
+                            # Re-classify using keyword classification
+                            df_account["category"] = df_account["description"].apply(
+                                lambda x: classify_with_keywords(x, active_cats)
+                            )
+                            
+                            # Save back
+                            df_account.to_csv(file_path, index=False)
+                    
+                    progress_bar.progress(1.0, text="Complete!")
+                    st.success(f"✅ Re-classified {total_accounts} account(s)!")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
     
     # Filter by date
     df = df[(df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)]
