@@ -221,3 +221,5 @@ logs/
 
 # Data
 data/
+
+.DS_Store
