@@ -5,12 +5,31 @@ import plotly.graph_objects as go
 from pathlib import Path
 import datetime
 import json
+import uuid
 
-# Paths
-USER_ACCOUNTS_FILE = Path("data/user_accounts.json")
-USER_CATEGORIES_FILE = Path("data/user_categories.json")
-USER_DATA_DIR = Path("data/user_uploads")
-USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+# Base data directory
+BASE_DATA_DIR = Path("data/sessions")
+
+
+def get_session_id() -> str:
+    """Get or create a unique session ID for the current user."""
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())[:8]
+    return st.session_state.session_id
+
+
+def get_session_paths() -> tuple[Path, Path, Path]:
+    """Get session-specific paths for user data."""
+    session_id = get_session_id()
+    session_dir = BASE_DATA_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    
+    accounts_file = session_dir / "user_accounts.json"
+    categories_file = session_dir / "user_categories.json"
+    uploads_dir = session_dir / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    
+    return accounts_file, categories_file, uploads_dir
 
 # Page config
 st.set_page_config(
@@ -436,24 +455,27 @@ def classify_transaction(description: str, categories: dict = None) -> str:
 
 def load_user_accounts() -> dict:
     """Load user accounts from JSON file."""
-    if USER_ACCOUNTS_FILE.exists():
-        with open(USER_ACCOUNTS_FILE, "r") as f:
+    accounts_file, _, _ = get_session_paths()
+    if accounts_file.exists():
+        with open(accounts_file, "r") as f:
             return json.load(f)
     return {}
 
 
 def save_user_accounts(accounts: dict):
     """Save user accounts to JSON file."""
-    USER_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(USER_ACCOUNTS_FILE, "w") as f:
+    accounts_file, _, _ = get_session_paths()
+    accounts_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(accounts_file, "w") as f:
         json.dump(accounts, f, indent=2)
 
 
 def load_user_categories() -> dict:
     """Load user-customized categories from JSON file, or return defaults."""
-    if USER_CATEGORIES_FILE.exists():
+    _, categories_file, _ = get_session_paths()
+    if categories_file.exists():
         try:
-            with open(USER_CATEGORIES_FILE, "r") as f:
+            with open(categories_file, "r") as f:
                 return json.load(f)
         except (json.JSONDecodeError, Exception):
             pass
@@ -462,8 +484,9 @@ def load_user_categories() -> dict:
 
 def save_user_categories(categories: dict):
     """Save user-customized categories to JSON file."""
-    USER_CATEGORIES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(USER_CATEGORIES_FILE, "w") as f:
+    _, categories_file, _ = get_session_paths()
+    categories_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(categories_file, "w") as f:
         json.dump(categories, f, indent=2)
 
 
@@ -648,8 +671,9 @@ def process_uploaded_file(uploaded_file, account_name: str, account_type: str = 
     account_key = account_name.lower().replace(" ", "_").replace("-", "_")
     account_key = "".join(c for c in account_key if c.isalnum() or c == "_")
     
-    # Save processed file
-    output_path = USER_DATA_DIR / f"{account_key}_classified.csv"
+    # Save processed file to session-specific directory
+    _, _, uploads_dir = get_session_paths()
+    output_path = uploads_dir / f"{account_key}_classified.csv"
     df.to_csv(output_path, index=False)
     
     # Save account config
@@ -693,8 +717,9 @@ def process_td_credit_card_files(uploaded_files: list, account_name: str, progre
     account_key = account_name.lower().replace(" ", "_").replace("-", "_")
     account_key = "".join(c for c in account_key if c.isalnum() or c == "_")
     
-    # Save processed file
-    output_path = USER_DATA_DIR / f"{account_key}_classified.csv"
+    # Save processed file to session-specific directory
+    _, _, uploads_dir = get_session_paths()
+    output_path = uploads_dir / f"{account_key}_classified.csv"
     df.to_csv(output_path, index=False)
     
     # Save account config
@@ -1129,8 +1154,9 @@ def main():
             with col2:
                 if st.button("🔄 Reset", use_container_width=True, key="reset_categories"):
                     # Delete user categories file and reset session state
-                    if USER_CATEGORIES_FILE.exists():
-                        USER_CATEGORIES_FILE.unlink()
+                    _, categories_file, _ = get_session_paths()
+                    if categories_file.exists():
+                        categories_file.unlink()
                     st.session_state.user_categories = CATEGORIES
                     st.success("✅ Reset to defaults!")
                     st.rerun()
